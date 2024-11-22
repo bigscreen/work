@@ -1,6 +1,7 @@
 package work
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -493,26 +494,28 @@ func (c *Client) DeleteScheduledJob(scheduledFor int64, jobID string) error {
 
 	// If we get a job back, parse it and see if it's a unique job. If it is, we need to delete the unique key.
 	if len(jobBytes) > 0 {
-		job, err := newJob(jobBytes, nil, nil)
-		if err != nil {
-			logError("client.delete_scheduled_job.new_job", err)
+		if err := c.deleteScheduledUniqueJob(jobBytes); err != nil {
 			return err
 		}
+	}
 
-		if job.Unique {
-			uniqueKey, err := redisKeyUniqueJob(c.namespace, job.Name, job.Args)
-			if err != nil {
-				logError("client.delete_scheduled_job.redis_key_unique_job", err)
-				return err
-			}
-			conn := c.pool.Get()
-			defer conn.Close()
+	if !ok {
+		return ErrNotDeleted
+	}
+	return nil
+}
 
-			_, err = conn.Do("DEL", uniqueKey)
-			if err != nil {
-				logError("worker.delete_unique_job.del", err)
-				return err
-			}
+// DeleteScheduledJobsByNameAndArgs deletes a job in the scheduled queue by job name and args.
+func (c *Client) DeleteScheduledJobsByNameAndArgs(scheduledFor int64, jobName string, jobArgs map[string]interface{}) error {
+	ok, jobBytes, err := c.deleteZsetJobsByNameAndArgs(redisKeyScheduled(c.namespace), scheduledFor, jobName, jobArgs)
+	if err != nil {
+		return err
+	}
+
+	// If we get a job back, parse it and see if it's a unique job. If it is, we need to delete the unique key.
+	if len(jobBytes) > 0 {
+		if err := c.deleteScheduledUniqueJob(jobBytes); err != nil {
+			return err
 		}
 	}
 
@@ -558,6 +561,66 @@ func (c *Client) deleteZsetJob(zsetKey string, zscore int64, jobID string) (bool
 	}
 
 	return cnt > 0, jobBytes, nil
+}
+
+// deleteZsetJobsByNameAndArgs deletes the job in the specified zset (dead, retry, or scheduled queue). zsetKey is like "work:dead" or "work:scheduled". The function deletes all jobs with the given jobName and jobArgs with the specified zscore.
+func (c *Client) deleteZsetJobsByNameAndArgs(zsetKey string, zscore int64, jobName string, jobArgs map[string]interface{}) (bool, []byte, error) {
+	script := redis.NewScript(1, redisLuaDeleteByNameAndArgsCmd)
+
+	serializedJobArgs, err := json.Marshal(jobArgs)
+	if err != nil {
+		logError("client.delete_zset_jobs_by_name_and_args.do", err)
+		return false, nil, err
+	}
+
+	args := make([]interface{}, 0, 1+3)
+	args = append(args, zsetKey)           // KEY[1]
+	args = append(args, zscore)            // ARGV[1]
+	args = append(args, jobName)           // ARGV[2]
+	args = append(args, serializedJobArgs) // ARGV[3]
+
+	conn := c.pool.Get()
+	defer conn.Close()
+	values, err := redis.Values(script.Do(conn, args...))
+	if len(values) != 2 {
+		return false, nil, fmt.Errorf("need 2 elements back from redis command")
+	}
+
+	cnt, err := redis.Int64(values[0], err)
+	jobBytes, err := redis.Bytes(values[1], err)
+	if err != nil {
+		logError("client.delete_zset_jobs_by_name_and_args.do", err)
+		return false, nil, err
+	}
+
+	return cnt > 0, jobBytes, nil
+}
+
+// deleteScheduledUniqueJob deletes the unique key for a scheduled job.
+func (c *Client) deleteScheduledUniqueJob(jobBytes []byte) error {
+	job, err := newJob(jobBytes, nil, nil)
+	if err != nil {
+		logError("client.delete_scheduled_job.new_job", err)
+		return err
+	}
+
+	if job.Unique {
+		uniqueKey, err := redisKeyUniqueJob(c.namespace, job.Name, job.Args)
+		if err != nil {
+			logError("client.delete_scheduled_job.redis_key_unique_job", err)
+			return err
+		}
+		conn := c.pool.Get()
+		defer conn.Close()
+
+		_, err = conn.Do("DEL", uniqueKey)
+		if err != nil {
+			logError("worker.delete_unique_job.del", err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 type jobScore struct {

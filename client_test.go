@@ -671,6 +671,62 @@ func TestClientDeleteScheduledUniqueJob(t *testing.T) {
 	assert.NotNil(t, j) // Nil? We didn't clear the unique job signature.
 }
 
+func TestClientDeleteScheduledJobsByNameAndArgs(t *testing.T) {
+	pool := newTestPool(t)
+	ns := "testwork"
+	cleanKeyspace(ns, pool)
+
+	ct := int64(1732204192)
+	setNowEpochSecondsMock(ct)
+	defer resetNowEpochSecondsMock()
+
+	// Delete an invalid job. Make sure we get error
+	client := NewClient(ns, pool)
+	err := client.DeleteScheduledJobsByNameAndArgs(3, "foo", Q{"key": "val"})
+	assert.Equal(t, ErrNotDeleted, err)
+
+	// Schedule a job. Delete it.
+	enq := NewEnqueuer(ns, pool)
+	j1, err := enq.EnqueueIn("bar", 10, Q{"key": "val1"})
+	assert.NoError(t, err)
+	assert.NotNil(t, j1)
+
+	err = client.DeleteScheduledJobsByNameAndArgs(j1.RunAt, j1.Name, j1.Args)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0, zsetSize(pool, redisKeyScheduled(ns)))
+
+	// Schedule jobs. Delete these.
+	j2 := ScheduledJob{Job: &Job{Name: "bar", Args: Q{"key": "val2"}}, RunAt: ct + 10}
+	_, err = enq.EnqueueIn(j2.Name, 10, j2.Args)
+	_, err = enq.EnqueueIn(j2.Name, 10, j2.Args)
+	assert.NoError(t, err)
+
+	err = client.DeleteScheduledJobsByNameAndArgs(j2.RunAt, j2.Name, j2.Args)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0, zsetSize(pool, redisKeyScheduled(ns)))
+}
+
+func TestClientDeleteScheduledUniqueJobsByNameAndArgs(t *testing.T) {
+	pool := newTestPool(t)
+	ns := "testwork"
+	cleanKeyspace(ns, pool)
+
+	// Schedule a unique job. Delete it. Ensure we can schedule it again.
+	enq := NewEnqueuer(ns, pool)
+	j, err := enq.EnqueueUniqueIn("foo", 10, Q{"key": "val"})
+	assert.NoError(t, err)
+	assert.NotNil(t, j)
+
+	client := NewClient(ns, pool)
+	err = client.DeleteScheduledJobsByNameAndArgs(j.RunAt, j.Name, j.Args)
+	assert.NoError(t, err)
+	assert.EqualValues(t, 0, zsetSize(pool, redisKeyScheduled(ns)))
+
+	j, err = enq.EnqueueUniqueIn("foo", 10, Q{"key": "val"})
+	assert.NoError(t, err)
+	assert.NotNil(t, j)
+}
+
 func TestClientDeleteRetryJob(t *testing.T) {
 	pool := newTestPool(t)
 	ns := "testwork"

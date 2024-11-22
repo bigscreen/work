@@ -268,6 +268,30 @@ end
 return {deletedCount, jobBytes}
 `
 
+// KEYS[1] = zset of (dead|scheduled|retry), eg, work:dead
+// ARGV[1] = z rank of (dead|scheduled|retry) job
+// ARGV[2] = name of job in z member
+// ARGV[3] = args of job in z member
+// - number of jobs deleted
+// - job bytes (last job only)
+var redisLuaDeleteByNameAndArgsCmd = `
+local jobs, i, j, deletedCount, jobBytes
+jobs = redis.call('zrangebyscore', KEYS[1], ARGV[1], ARGV[1])
+local jobCount = #jobs
+jobBytes = ''
+deletedCount = 0
+for i=1,jobCount do
+  j = cjson.decode(jobs[i])
+  print(j['args'])
+  if j['name'] == ARGV[2] and cjson.encode(j['args']) == ARGV[3] then
+    redis.call('zrem', KEYS[1], jobs[i])
+    deletedCount = deletedCount + 1
+    jobBytes = jobs[i]
+  end
+end
+return {deletedCount, jobBytes}
+`
+
 // KEYS[1] = zset of dead jobs, eg, work:dead
 // KEYS[2...] = known job queues, eg ["work:jobs:create_watch", "work:jobs:send_email", ...]
 // ARGV[1] = jobs prefix, eg, "work:jobs:". We'll take that and append the job name from the JSON object in order to queue up a job
